@@ -3,44 +3,66 @@ const cors = require('cors');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
-app.use(cors());
+
+// Libera CORS para qualquer origem
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'HEAD', 'OPTIONS'],
+  allowedHeaders: ['*']
+}));
 
 app.get('/', (req, res) => {
-  res.send('SOARES TV Proxy Backend is Running!');
+  res.send('SOARES TV Proxy Backend está rodando!');
 });
 
 app.use('/stream', (req, res, next) => {
   const targetUrl = req.query.url;
+  
   if (!targetUrl) {
     return res.status(400).send('URL do canal não informada.');
   }
 
-  createProxyMiddleware({
-    target: targetUrl,
-    changeOrigin: true,
-    ws: true,
-    secure: false,
-    on: {
-      proxyReq: (proxyReq, req, res) => {
-        // Força cabeçalhos para parecer um player real ou VLC e evitar bloqueios
-        proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        proxyReq.setHeader('Referer', targetUrl);
+  try {
+    const parsedUrl = new URL(targetUrl);
+
+    return createProxyMiddleware({
+      target: parsedUrl.origin,
+      changeOrigin: true,
+      followRedirects: true,
+      secure: false, // Permite conexões HTTP/HTTPS sem checagem estrita de SSL
+      pathRewrite: (path, req) => {
+        // Redireciona o caminho completo exato da transmissão
+        return parsedUrl.pathname + parsedUrl.search;
       },
-      proxyRes: (proxyRes, req, res) => {
-        // Garante que o CORS continue liberado nas respostas do stream
-        proxyRes.headers['Access-Control-Allow-Origin'] = '*';
-      },
-      error: (err, req, res) => {
-        console.error('Erro no proxy:', err.message);
-        if (!res.headersSent) {
-          res.status(500).send('Erro ao conectar com o canal.');
+      on: {
+        proxyReq: (proxyReq, req, res) => {
+          // Força o User-Agent do VLC/FFmpeg (que os servidores de IPTV aceitam sem bloquear)
+          proxyReq.setHeader('User-Agent', 'VLC/3.0.18 LibVLC/3.0.18');
+          proxyReq.setHeader('Accept', '*/*');
+          proxyReq.setHeader('Connection', 'keep-alive');
+          proxyReq.removeHeader('origin');
+          proxyReq.removeHeader('referer');
+        },
+        proxyRes: (proxyRes, req, res) => {
+          // Garante os cabeçalhos de CORS na resposta de cada fragmento
+          proxyRes.headers['access-control-allow-origin'] = '*';
+          proxyRes.headers['access-control-allow-methods'] = 'GET, HEAD, OPTIONS';
+          proxyRes.headers['access-control-allow-headers'] = '*';
+        },
+        error: (err, req, res) => {
+          console.error('Erro no proxy:', err.message);
+          if (!res.headersSent) {
+            res.status(502).send('Falha ao conectar com o servidor da fonte do canal.');
+          }
         }
       }
-    }
-  })(req, res, next);
+    })(req, res, next);
+  } catch (err) {
+    return res.status(400).send('URL inválida.');
+  }
 });
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`Soares TV Proxy rodando na porta ${PORT}`);
+  console.log(`SOARES TV Proxy rodando na porta ${PORT}`);
 });
