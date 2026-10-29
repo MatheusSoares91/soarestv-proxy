@@ -3,10 +3,15 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
-app.use(cors());
 
-// Coloque aqui os domínios das fontes que você
-// tem autorização para retransmitir.
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'HEAD', 'OPTIONS'],
+  allowedHeaders: ['*']
+}));
+
+// Domínios autorizados configurados no Render.
+// Exemplo: ALLOWED_STREAM_HOSTS=exemplo.com,outro-exemplo.com
 const ALLOWED_HOSTS = new Set(
   (process.env.ALLOWED_STREAM_HOSTS || '')
     .split(',')
@@ -22,39 +27,51 @@ app.get('/stream', async (req, res) => {
   const source = req.query.url;
 
   if (typeof source !== 'string' || !source) {
-    return res.status(400).send('URL não informada.');
+    return res.status(400).send('URL do canal não informada.');
+  }
+
+  let url;
+
+  try {
+    url = new URL(source);
+  } catch {
+    return res.status(400).send('URL inválida.');
+  }
+
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    return res.status(400).send('Protocolo não permitido.');
+  }
+
+  if (!ALLOWED_HOSTS.has(url.hostname.toLowerCase())) {
+    return res.status(403).send(
+      'Domínio não autorizado. Configure ALLOWED_STREAM_HOSTS no Render.'
+    );
   }
 
   try {
-    const url = new URL(source);
-
-    if (
-      !['http:', 'https:'].includes(url.protocol) ||
-      !ALLOWED_HOSTS.has(url.hostname.toLowerCase())
-    ) {
-      return res.status(403).send('Fonte não autorizada.');
-    }
-
     const upstream = await fetch(url, {
       headers: {
-        'Accept': '*/*'
+        Accept: '*/*'
       },
-      signal: AbortSignal.timeout(15000)
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20000)
     });
 
     if (!upstream.ok) {
-      return res.status(upstream.status)
-        .send(`Erro na fonte: ${upstream.status}`);
+      return res.status(upstream.status).send(
+        `A fonte respondeu com HTTP ${upstream.status}.`
+      );
     }
 
     const contentType =
       upstream.headers.get('content-type') || '';
 
     const isPlaylist =
-      url.pathname.toLowerCase().endsWith('.m3u8') ||
-      contentType.includes('mpegurl');
+      /\.m3u8(?:$|\?)/i.test(url.href) ||
+      contentType.toLowerCase().includes('mpegurl');
 
     res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-Control-Allow-Origin', '*');
 
     if (isPlaylist) {
       const playlist = await upstream.text();
@@ -64,48 +81,67 @@ app.get('/stream', async (req, res) => {
         .map(line => {
           const trimmed = line.trim();
 
-          // Reescreve URI="..." em tags HLS,
-          // como EXT-X-KEY e EXT-X-MAP.
-          let result = line.replace(
-            /URI="([^"]+)"/g,
-            (_, uri) => {
-              const absolute = new URL(uri, url).href;
-              return `URI="/stream?url=${encodeURIComponent(absolute)}"`;
-            }
-          );
-
-          // Mantém comentários e linhas vazias.
-          if (!trimmed || trimmed.startsWith('#')) {
-            return result;
+          if (!trimmed) {
+            return line;
           }
 
-          // Reescreve playlists filhas e segmentos.
-          const absolute = new URL(trimmed, url).href;
-          return `/stream?url=${encodeURIComponent(absolute)}`;
+          // Corrige URIs presentes em tags HLS.
+          if (trimmed.startsWith('#')) {
+            return line.replace(
+              /URI="([^"]+)"/g,
+              (match, uri) => {
+                try {
+                  const absoluteUrl = new URL(uri, url).href;
+
+                  return `URI="/stream?url=${encodeURIComponent(
+                    absoluteUrl
+                  )}"`;
+                } catch {
+                  return match;
+                }
+              }
+            );
+          }
+
+          // Converte caminhos relativos em URLs absolutas
+          // encaminhadas pelo endpoint /stream.
+          try {
+            const absoluteUrl = new URL(trimmed, url).href;
+
+            return `/stream?url=${encodeURIComponent(
+              absoluteUrl
+            )}`;
+          } catch {
+            return line;
+          }
         })
         .join('\n');
 
-      res.type('application/vnd.apple.mpegurl');
+      res.setHeader(
+        'Content-Type',
+        'application/vnd.apple.mpegurl; charset=utf-8'
+      );
+
       return res.send(rewritten);
     }
 
+    // Mantém o conteúdo binário dos segmentos de vídeo.
     res.setHeader(
       'Content-Type',
       contentType || 'application/octet-stream'
     );
 
-    const buffer = Buffer.from(
-      await upstream.arrayBuffer()
-    );
+    const data = Buffer.from(await upstream.arrayBuffer());
 
-    return res.send(buffer);
+    return res.send(data);
 
   } catch (error) {
     console.error('Erro no proxy:', error.message);
 
     if (!res.headersSent) {
-      return res.status(502)
-        .send('Falha ao carregar a transmissão.');
+      return res.status(502).send(
+        'Falha ao conectar com a fonte da transmissão.'
+      );
     }
   }
 });
