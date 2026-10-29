@@ -5,12 +5,10 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const app = express();
 app.use(cors());
 
-// Rota de saúde para a Render saber que o servidor está online
 app.get('/', (req, res) => {
   res.send('SOARES TV Proxy Backend is Running!');
 });
 
-// Rota de Proxy para os fluxos de IPTV
 app.use('/stream', (req, res, next) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
@@ -24,8 +22,13 @@ app.use('/stream', (req, res, next) => {
     secure: false,
     on: {
       proxyReq: (proxyReq, req, res) => {
-        // Mascara o User-Agent para parecer um player legítimo (ex: VLC) e evitar bloqueios
-        proxyReq.setHeader('User-Agent', 'VLC/3.0.18 LibVLC/3.0.18');
+        // Força cabeçalhos para parecer um player real ou VLC e evitar bloqueios
+        proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        proxyReq.setHeader('Referer', targetUrl);
+      },
+      proxyRes: (proxyRes, req, res) => {
+        // Garante que o CORS continue liberado nas respostas do stream
+        proxyRes.headers['Access-Control-Allow-Origin'] = '*';
       },
       error: (err, req, res) => {
         console.error('Erro no proxy:', err.message);
@@ -37,7 +40,7 @@ app.use('/stream', (req, res, next) => {
   })(req, res, next);
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`Soares TV Proxy rodando na porta ${PORT}`);
 });
